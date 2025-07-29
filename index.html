@@ -1,0 +1,419 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Fluid Simulation</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            display: flex;
+            justify-content: center;
+            align-items: flex-start;
+            gap: 20px;
+            margin: 20px;
+            background-color: #f4f4f4;
+        }
+        #simulationWrapper {
+            border: 1px solid #ccc;
+            box-shadow: 2px 2px 8px rgba(0,0,0,0.1);
+        }
+        canvas {
+            background-color: #fff;
+            display: block;
+        }
+        #controlPanel {
+            border: 1px solid #ccc;
+            padding: 15px;
+            background-color: #fff;
+            box-shadow: 2px 2px 8px rgba(0,0,0,0.1);
+            display: flex;
+            flex-direction: column;
+            gap: 15px;
+        }
+        .slider-panel {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        .slider-panel label {
+            width: 120px;
+            text-align: right;
+        }
+        .button-group {
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+        button {
+            padding: 10px 15px;
+            cursor: pointer;
+            background-color: #007bff;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            font-size: 16px;
+        }
+        button:hover {
+            background-color: #0056b3;
+        }
+    </style>
+</head>
+<body>
+    <div id="simulationWrapper">
+        <canvas id="simulationCanvas"></canvas>
+    </div>
+
+    <div id="controlPanel">
+        <div class="button-group">
+            <button id="toggleDrawLines">Toggle Draw Lines</button>
+            <button id="resetSimulation">Reset Simulation</button>
+            <button id="toggleObstacle">Toggle Obstacles</button>
+            <button id="togglePlot">Toggle Plot (Density / Speed)</button>
+        </div>
+
+        <div class="slider-panel">
+            <label for="densityVariationSlider">Density Variation:</label>
+            <input type="range" id="densityVariationSlider" min="0" max="10" value="3">
+        </div>
+        <div class="slider-panel">
+            <label for="flowSpeedSlider">Flow Speed:</label>
+            <input type="range" id="flowSpeedSlider" min="0" max="10" value="1">
+        </div>
+        <div class="slider-panel">
+            <label for="viscositySlider">Viscosity:</label>
+            <input type="range" id="viscositySlider" min="6" max="10" value="6">
+        </div>
+    </div>
+
+    <script>
+        class Simulation {
+            constructor(canvasId) {
+                this.canvas = document.getElementById(canvasId);
+                this.ctx = this.canvas.getContext('2d');
+
+                this.xDimension = 200;
+                this.yDimension = 100;
+                this.scale = 4;
+
+                this.canvas.width = this.xDimension * this.scale;
+                this.canvas.height = this.yDimension * this.scale;
+
+                this.density = new Float64Array(this.xDimension * this.yDimension * 9);
+                this.density2 = new Float64Array(this.xDimension * this.yDimension * 9);
+                this.xVelocity = Array(this.xDimension).fill(0).map(() => new Float64Array(this.yDimension));
+                this.yVelocity = Array(this.xDimension).fill(0).map(() => new Float64Array(this.yDimension));
+                this.macroDensity = Array(this.xDimension).fill(0).map(() => new Float64Array(this.yDimension));
+                this.barrier = Array(this.xDimension).fill(0).map(() => Array(this.yDimension).fill(false));
+
+                this.tau = 0.6;
+                this.flowSpeed = 0.1;
+
+                this.plot = 0;
+                this.drawLines = true;
+                this.densityVariation = 0.03;
+                this.obstacle = 0;
+
+                this.directionXVector = [0, 0, 0, 1, -1, 1, -1, -1, 1];
+                this.directionYVector = [0, 1, -1, 0, 0, 1, -1, 1, -1];
+                this.directionWeights = [4.0/9, 1.0/9, 1.0/9, 1.0/9, 1.0/9, 1.0/36, 1.0/36, 1.0/36, 1.0/36];
+                this.oppositeDirection = [0, 2, 1, 4, 3, 7, 5, 6, 8];
+
+                this.imageData = this.ctx.createImageData(this.xDimension, this.yDimension);
+                this.pixels = new Uint32Array(this.imageData.data.buffer);
+
+                this.stepsPerFrame = 15;
+
+                this.initializeSimulation();
+                this.animationFrameId = null;
+                this.startAnimation();
+            }
+
+            index(x, y, d) {
+                return (x * this.yDimension + y) * 9 + d;
+            }
+
+            initializeSimulation() {
+                this.barrier = this.drawBarriers(this.obstacle, this.xDimension, this.yDimension);
+                for (let x = 0; x < this.xDimension; x++) {
+                    this.barrier[x][0] = this.barrier[x][this.yDimension - 1] = true;
+                }
+
+                const uX = this.flowSpeed;
+                const uY = 0.0;
+                for (let x = 0; x < this.xDimension; x++) {
+                    for (let y = 0; y < this.yDimension; y++) {
+                        if (!this.barrier[x][y]) {
+                            for (let d = 0; d < 9; d++) {
+                                const eDotU = this.directionXVector[d] * uX + this.directionYVector[d] * uY;
+                                const uSqr = uX * uX + uY * uY;
+                                this.density[this.index(x, y, d)] = this.directionWeights[d] * (1 + 3 * eDotU + 4.5 * eDotU * eDotU - 1.5 * uSqr);
+                            }
+                        } else {
+                            for (let d = 0; d < 9; d++) {
+                                this.density[this.index(x, y, d)] = 0;
+                            }
+                        }
+                    }
+                }
+            }
+
+            resetSimulation() {
+                this.density.fill(0);
+                this.density2.fill(0);
+                for(let x = 0; x < this.xDimension; x++) {
+                    this.xVelocity[x].fill(0);
+                    this.yVelocity[x].fill(0);
+                    this.macroDensity[x].fill(0);
+                    this.barrier[x].fill(false);
+                }
+                this.initializeSimulation();
+            }
+
+            collision() {
+                for (let x = 0; x < this.xDimension; x++) {
+                    for (let y = 0; y < this.yDimension; y++) {
+                        if (!this.barrier[x][y]) {
+                            let totalDensity = 0;
+                            let vX = 0;
+                            let vY = 0;
+
+                            for (let d = 0; d < 9; d++) {
+                                totalDensity += this.density[this.index(x, y, d)];
+                            }
+                            this.macroDensity[x][y] = totalDensity;
+
+                            if (totalDensity > 1e-6) {
+                                for (let d = 0; d < 9; d++) {
+                                    vX += this.directionXVector[d] * this.density[this.index(x, y, d)];
+                                    vY += this.directionYVector[d] * this.density[this.index(x, y, d)];
+                                }
+                                vX /= totalDensity;
+                                vY /= totalDensity;
+                            }
+                            this.xVelocity[x][y] = vX;
+                            this.yVelocity[x][y] = vY;
+
+                            const uSquared = vX * vX + vY * vY;
+
+                            for (let d = 0; d < 9; d++) {
+                                const dotProduct = this.directionXVector[d] * vX + this.directionYVector[d] * vY;
+                                const equilibriumDensity = totalDensity * this.directionWeights[d] * (1 + 3 * dotProduct + 4.5 * dotProduct * dotProduct - 1.5 * uSquared);
+                                this.density[this.index(x, y, d)] = (1.0 - 1.0 / this.tau) * this.density[this.index(x, y, d)] + (1.0 / this.tau) * equilibriumDensity;
+                            }
+                        }
+                    }
+                }
+            }
+
+            streamingAndBoundary() {
+                for (let x = 0; x < this.xDimension; x++) {
+                    for (let y = 0; y < this.yDimension; y++) {
+                        if (this.barrier[x][y]) {
+                            for (let d = 0; d < 9; d++) {
+                                this.density2[this.index(x, y, d)] = this.density[this.index(x, y, this.oppositeDirection[d])];
+                            }
+                            continue;
+                        }
+
+                        for (let d = 0; d < 9; d++) {
+                            const prevX = x - this.directionXVector[d];
+                            const prevY = y - this.directionYVector[d];
+
+                            if (prevX >= 0 && prevX < this.xDimension && prevY >= 0 && prevY < this.yDimension && !this.barrier[prevX][prevY]) {
+                                this.density2[this.index(x, y, d)] = this.density[this.index(prevX, prevY, d)];
+                            } else {
+                                if (prevX < 0 || prevX >= this.xDimension || prevY < 0 || prevY >= this.yDimension || this.barrier[prevX][prevY]) {
+                                    this.density2[this.index(x, y, d)] = this.density[this.index(x, y, this.oppositeDirection[d])];
+                                }
+                            }
+                        }
+                    }
+                }
+                let temp = this.density;
+                this.density = this.density2;
+                this.density2 = temp;
+            }
+
+            inlet() {
+                const densityFlow = 1.0;
+                const vYFlow = 0.0;
+                const uSquared = this.flowSpeed * this.flowSpeed + vYFlow * vYFlow;
+
+                for (let y = 0; y < this.yDimension; y++) {
+                    if (!this.barrier[0][y]) {
+                        for (let d = 0; d < 9; d++) {
+                            const dotProduct = this.directionXVector[d] * this.flowSpeed + this.directionYVector[d] * vYFlow;
+                            this.density[this.index(0, y, d)] = this.directionWeights[d] * (densityFlow + 3 * dotProduct + 4.5 * dotProduct * dotProduct - 1.5 * uSquared);
+                        }
+                    }
+                    if (!this.barrier[this.xDimension - 1][y]) {
+                        for (let d = 0; d < 9; d++) {
+                            const dotProduct = this.directionXVector[d] * this.flowSpeed + this.directionYVector[d] * vYFlow;
+                            this.density[this.index(this.xDimension - 1, y, d)] = this.directionWeights[d] * (densityFlow + 3 * dotProduct + 4.5 * dotProduct * dotProduct - 1.5 * uSquared);
+                        }
+                    }
+                }
+            }
+
+            renderToImage() {
+                const displayMaxSpeed = 0.2;
+                for (let x = 0; x < this.xDimension; x++) {
+                    for (let y = 0; y < this.yDimension; y++) {
+                        let color;
+                        if (this.barrier[x][y]) {
+                            color = 0xFF0000;
+                        } else {
+                            if (this.plot === 0) {
+                                const normalizedSpeed = Math.sqrt(this.xVelocity[x][y] * this.xVelocity[x][y] + this.yVelocity[x][y] * this.yVelocity[x][y]) / displayMaxSpeed;
+                                const intensity = Math.floor(Math.max(0.0, Math.min(1.0, normalizedSpeed)) * 255);
+                                color = (0xFF << 24) | (intensity << 16) | (intensity << 8) | (intensity);
+                            } else if (this.plot === 1) {
+                                const dens = this.macroDensity[x][y];
+                                let intensity = Math.floor(((dens - (1 - this.densityVariation)) / (2 * this.densityVariation)) * 255);
+                                intensity = Math.max(0, Math.min(255, intensity));
+                                color = (0xFF << 24) | (intensity << 16) | (intensity << 8) | (intensity);
+                            }
+                        }
+                        this.pixels[y * this.xDimension + x] = color;
+                    }
+                }
+                this.ctx.putImageData(this.imageData, 0, 0, 0, 0, this.xDimension, this.yDimension);
+            }
+
+            drawBarriers(index, xDimension, yDimension) {
+                const barrier = Array(xDimension).fill(0).map(() => Array(yDimension).fill(false));
+                if (index === 0) {
+                    for (let y = 35; y <= 65; y++) {
+                        barrier[50][y] = true;
+                    }
+                } else if (index === 1) {
+                    const centerX = 50;
+                    const centerY = 50;
+                    const radius = 15;
+                    for (let x = centerX - radius; x <= centerX + radius; x++) {
+                        for (let y = centerY - radius; y <= centerY + radius; y++) {
+                            if (x >= 0 && x < xDimension && y >= 0 && y < yDimension) {
+                                const dx = x - centerX;
+                                const dy = y - centerY;
+                                if (dx * dx + dy * dy <= radius * radius) {
+                                    barrier[x][y] = true;
+                                }
+                            }
+                        }
+                    }
+                } else if (index === 2) {
+                    const pipeStart = 50;
+                    const pipeEnd = 100;
+                    const maxHalfHeight = 25;
+                    const minHalfHeight = 15;
+                    for (let x = pipeStart; x < pipeEnd; x++) {
+                        const t = (x - pipeStart) / (pipeEnd - pipeStart);
+                        const halfOpening = maxHalfHeight - (maxHalfHeight - minHalfHeight) * t;
+
+                        const centerY = Math.floor(yDimension / 2);
+                        const upperWall = centerY - Math.floor(halfOpening);
+                        const lowerWall = centerY + Math.floor(halfOpening);
+
+                        for (let y = 0; y < yDimension; y++) {
+                            if (y === 0 || y === yDimension - 1) continue;
+                            if (y <= upperWall || y >= lowerWall) barrier[x][y] = true;
+                        }
+                    }
+                }
+                return barrier;
+            }
+
+            paint() {
+                for (let n = 0; n < this.stepsPerFrame; n++) {
+                    this.inlet();
+                    this.collision();
+                    this.streamingAndBoundary();
+                }
+
+                this.renderToImage();
+                this.ctx.drawImage(this.canvas, 0, 0, this.xDimension, this.yDimension, 0, 0, this.xDimension * this.scale, this.yDimension * this.scale);
+
+
+                if (this.drawLines) {
+                    this.ctx.strokeStyle = 'blue';
+                    this.ctx.lineWidth = 1;
+
+                    for (let x = 0; x < this.xDimension; x++) {
+                        for (let y = 0; y < this.yDimension; y++) {
+                            if (x % 5 === 0 && y % 5 === 0 && !this.barrier[x][y]) {
+                                let magnitudeScale = 0;
+                                const magnitude = Math.sqrt(this.xVelocity[x][y] * this.xVelocity[x][y] + this.yVelocity[x][y] * this.yVelocity[x][y]);
+                                const desiredMagnitude = 3;
+                                if (magnitude > 0) {
+                                    magnitudeScale = desiredMagnitude / magnitude;
+                                }
+                                const x1 = x * this.scale;
+                                const y1 = y * this.scale;
+                                const x2 = x1 + this.xVelocity[x][y] * magnitudeScale * this.scale;
+                                const y2 = y1 + this.yVelocity[x][y] * magnitudeScale * this.scale;
+
+                                this.ctx.beginPath();
+                                this.ctx.moveTo(x1, y1);
+                                this.ctx.lineTo(x2, y2);
+                                this.ctx.stroke();
+                            }
+                        }
+                    }
+                }
+            }
+
+            startAnimation() {
+                const animate = () => {
+                    this.paint();
+                    this.animationFrameId = requestAnimationFrame(animate);
+                };
+                this.animationFrameId = requestAnimationFrame(animate);
+            }
+
+            stopAnimation() {
+                if (this.animationFrameId) {
+                    cancelAnimationFrame(this.animationFrameId);
+                    this.animationFrameId = null;
+                }
+            }
+        }
+
+        const simulation = new Simulation('simulationCanvas');
+
+        document.getElementById('toggleDrawLines').addEventListener('click', () => {
+            simulation.drawLines = !simulation.drawLines;
+        });
+
+        document.getElementById('resetSimulation').addEventListener('click', () => {
+            simulation.resetSimulation();
+        });
+
+        document.getElementById('toggleObstacle').addEventListener('click', () => {
+            simulation.obstacle = (simulation.obstacle + 1) % 3;
+            simulation.resetSimulation();
+        });
+
+        document.getElementById('togglePlot').addEventListener('click', () => {
+            simulation.plot = (simulation.plot + 1) % 2;
+        });
+
+        document.getElementById('densityVariationSlider').addEventListener('input', (e) => {
+            simulation.densityVariation = parseFloat(e.target.value) / 100.0;
+        });
+
+        document.getElementById('flowSpeedSlider').addEventListener('input', (e) => {
+            simulation.flowSpeed = parseFloat(e.target.value) / 100.0;
+            simulation.resetSimulation();
+        });
+
+        document.getElementById('viscositySlider').addEventListener('input', (e) => {
+            simulation.tau = parseFloat(e.target.value) / 10.0;
+        });
+
+        document.getElementById('densityVariationSlider').value = simulation.densityVariation * 100;
+        document.getElementById('flowSpeedSlider').value = simulation.flowSpeed * 100;
+        document.getElementById('viscositySlider').value = simulation.tau * 10;
+    </script>
+</body>
+</html>
