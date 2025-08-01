@@ -294,7 +294,7 @@
                     for (let y = 0; y < this.yDimension; y++) {
                         let color;
                         if (this.barrier[this.index2D(x, y)]) {
-                            color = 0xFF0000;
+                            color = 0xFF0000FF;
                         } else {
                             if (this.plot === 0) {
                                 const normalizedSpeed = Math.sqrt(this.xVelocity[this.index2D(x, y)] * this.xVelocity[this.index2D(x, y)] + this.yVelocity[this.index2D(x, y)] * this.yVelocity[this.index2D(x, y)]) / displayMaxSpeed;
@@ -321,7 +321,7 @@
                     }
                 } else if (index === 1) {
                     const centerX = 50;
-                    const centerY = 50;
+                    const centerY = 40;
                     const radius = 15;
                     for (let x = centerX - radius; x <= centerX + radius; x++) {
                         for (let y = centerY - radius; y <= centerY + radius; y++) {
@@ -364,19 +364,20 @@
                     this.ctx.strokeStyle = 'blue';
                     this.ctx.lineWidth = 1;
 
-                    for (let x = 0; x < this.xDimension; x++) {
-                        for (let y = 0; y < this.yDimension; y++) {
-                            if (x % 10 === 0 && y % 10 === 0 && !this.barrier[this.index2D(x, y)]) {
+                    for (let x = 0; x < this.xDimension; x += 8) {
+                        for (let y = 0; y < this.yDimension; y += 8) {
+                            const index2D = x * this.yDimension + y;
+                            if (!this.barrier[index2D]) {
                                 let magnitudeScale = 0;
-                                const magnitude = Math.sqrt(this.xVelocity[this.index2D(x, y)] * this.xVelocity[this.index2D(x, y)] + this.yVelocity[this.index2D(x, y)] * this.yVelocity[this.index2D(x, y)]);
+                                const magnitude = Math.sqrt(this.xVelocity[index2D] * this.xVelocity[index2D] + this.yVelocity[index2D] * this.yVelocity[index2D]);
                                 const desiredMagnitude = 3;
                                 if (magnitude > 0) {
                                     magnitudeScale = desiredMagnitude / magnitude;
                                 }
                                 const x1 = x * this.scale;
                                 const y1 = y * this.scale;
-                                const x2 = x1 + this.xVelocity[this.index2D(x, y)] * magnitudeScale * this.scale;
-                                const y2 = y1 + this.yVelocity[this.index2D(x, y)] * magnitudeScale * this.scale;
+                                const x2 = x1 + this.xVelocity[index2D] * magnitudeScale * this.scale;
+                                const y2 = y1 + this.yVelocity[index2D] * magnitudeScale * this.scale;
 
                                 this.ctx.beginPath();
                                 this.ctx.moveTo(x1, y1);
