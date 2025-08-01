@@ -84,6 +84,10 @@
             <label for="viscositySlider">Viscosity:</label>
             <input type="range" id="viscositySlider" min="6" max="10" value="6">
         </div>
+        <div id="performance">
+            FPS: <span id="fps">0</span> | 
+            Frame Time: <span id="frameTime">0</span>ms
+        </div>
     </div>
 
     <script>
@@ -93,18 +97,18 @@
                 this.ctx = this.canvas.getContext('2d');
 
                 this.xDimension = 200;
-                this.yDimension = 100;
+                this.yDimension = 80;
                 this.scale = 4;
 
                 this.canvas.width = this.xDimension * this.scale;
                 this.canvas.height = this.yDimension * this.scale;
 
-                this.density = new Float64Array(this.xDimension * this.yDimension * 9);
-                this.density2 = new Float64Array(this.xDimension * this.yDimension * 9);
-                this.xVelocity = Array(this.xDimension).fill(0).map(() => new Float64Array(this.yDimension));
-                this.yVelocity = Array(this.xDimension).fill(0).map(() => new Float64Array(this.yDimension));
-                this.macroDensity = Array(this.xDimension).fill(0).map(() => new Float64Array(this.yDimension));
-                this.barrier = Array(this.xDimension).fill(0).map(() => Array(this.yDimension).fill(false));
+                this.density = new Float32Array(this.xDimension * this.yDimension * 9);
+                this.density2 = new Float32Array(this.xDimension * this.yDimension * 9);
+                this.xVelocity = new Float32Array(this.xDimension * this.yDimension);
+                this.yVelocity = new Float32Array(this.xDimension * this.yDimension);
+                this.macroDensity = new Float32Array(this.xDimension * this.yDimension);
+                this.barrier = new Uint8Array(this.xDimension * this.yDimension); 
 
                 this.tau = 0.6;
                 this.flowSpeed = 0.1;
@@ -117,41 +121,53 @@
                 this.directionXVector = [0, 0, 0, 1, -1, 1, -1, -1, 1];
                 this.directionYVector = [0, 1, -1, 0, 0, 1, -1, 1, -1];
                 this.directionWeights = [4.0/9, 1.0/9, 1.0/9, 1.0/9, 1.0/9, 1.0/36, 1.0/36, 1.0/36, 1.0/36];
+                this.threeTimesWeights = this.directionWeights.map(w => 3 * w);
+                this.fourPointFiveTimesWeights = this.directionWeights.map(w => 4.5 * w);
+                this.onePointFiveTimesWeights = this.directionWeights.map(w => 1.5 * w);
                 this.oppositeDirection = [0, 2, 1, 4, 3, 7, 5, 6, 8];
 
                 this.imageData = this.ctx.createImageData(this.xDimension, this.yDimension);
                 this.pixels = new Uint32Array(this.imageData.data.buffer);
 
-                this.stepsPerFrame = 15;
-
+                this.frameCount = 0;
+                this.lastFpsTime = performance.now();
+                this.lastFrameTime = 0;
+                
                 this.initializeSimulation();
                 this.animationFrameId = null;
+                this.lastTime = 0;
+                this.frameTime = 1000 / 60;
+                this.stepsPerFrame = 10;
                 this.startAnimation();
             }
 
-            index(x, y, d) {
+            index3D(x, y, d) {
                 return (x * this.yDimension + y) * 9 + d;
+            }
+
+            index2D(x, y){
+                return (x * this.yDimension + y);
             }
 
             initializeSimulation() {
                 this.barrier = this.drawBarriers(this.obstacle, this.xDimension, this.yDimension);
                 for (let x = 0; x < this.xDimension; x++) {
-                    this.barrier[x][0] = this.barrier[x][this.yDimension - 1] = true;
+                    this.barrier[this.index2D(x, 0)] = this.barrier[this.index2D(x, this.yDimension - 1)] = true;
                 }
 
                 const uX = this.flowSpeed;
                 const uY = 0.0;
                 for (let x = 0; x < this.xDimension; x++) {
                     for (let y = 0; y < this.yDimension; y++) {
-                        if (!this.barrier[x][y]) {
+                        if (!this.barrier[this.index2D(x, y)]) {
                             for (let d = 0; d < 9; d++) {
                                 const eDotU = this.directionXVector[d] * uX + this.directionYVector[d] * uY;
                                 const uSqr = uX * uX + uY * uY;
-                                this.density[this.index(x, y, d)] = this.directionWeights[d] * (1 + 3 * eDotU + 4.5 * eDotU * eDotU - 1.5 * uSqr);
+                                this.density[this.index3D(x, y, d)] = this.directionWeights[d] * (1 + 3 * eDotU + 4.5 * eDotU * eDotU - 1.5 * uSqr);
                             }
                         } else {
                             for (let d = 0; d < 9; d++) {
-                                this.density[this.index(x, y, d)] = 0;
+                                this.density[this.index3D(x, y, d)] = 0;
                             }
                         }
                     }
@@ -161,45 +177,57 @@
             resetSimulation() {
                 this.density.fill(0);
                 this.density2.fill(0);
-                for(let x = 0; x < this.xDimension; x++) {
-                    this.xVelocity[x].fill(0);
-                    this.yVelocity[x].fill(0);
-                    this.macroDensity[x].fill(0);
-                    this.barrier[x].fill(false);
-                }
+                this.xVelocity.fill(0);
+                this.yVelocity.fill(0);
+                this.macroDensity.fill(0);
+                this.barrier.fill(false);
                 this.initializeSimulation();
             }
 
             collision() {
+                const inverseTau = 1 / this.tau;
+                const oneMinusInverseTau = 1.0 - inverseTau;
                 for (let x = 0; x < this.xDimension; x++) {
+                    const xOffset = x * this.yDimension;
                     for (let y = 0; y < this.yDimension; y++) {
-                        if (!this.barrier[x][y]) {
+                        const index2D = xOffset + y;
+                        if (!this.barrier[this.index2D(x, y)]) {
+                            const index3DBase = index2D * 9;
+                            const index2DCache = this.index2D(x, y);
                             let totalDensity = 0;
                             let vX = 0;
                             let vY = 0;
 
-                            for (let d = 0; d < 9; d++) {
-                                totalDensity += this.density[this.index(x, y, d)];
-                            }
-                            this.macroDensity[x][y] = totalDensity;
+                            const d0 = this.density[index3DBase];
+                            const d1 = this.density[index3DBase + 1];
+                            const d2 = this.density[index3DBase + 2];
+                            const d3 = this.density[index3DBase + 3];
+                            const d4 = this.density[index3DBase + 4];
+                            const d5 = this.density[index3DBase + 5];
+                            const d6 = this.density[index3DBase + 6];
+                            const d7 = this.density[index3DBase + 7];
+                            const d8 = this.density[index3DBase + 8];
+
+                            totalDensity = d0 + d1 + d2 + d3 + d4 + d5 + d6 + d7 + d8;
+                            vX = d3 - d4 + d5 - d6 - d7 + d8;
+                            vY = d1 - d2 + d5 - d6 + d7 - d8;
+
+                            this.macroDensity[index2D] = totalDensity;
 
                             if (totalDensity > 1e-6) {
-                                for (let d = 0; d < 9; d++) {
-                                    vX += this.directionXVector[d] * this.density[this.index(x, y, d)];
-                                    vY += this.directionYVector[d] * this.density[this.index(x, y, d)];
-                                }
                                 vX /= totalDensity;
                                 vY /= totalDensity;
                             }
-                            this.xVelocity[x][y] = vX;
-                            this.yVelocity[x][y] = vY;
+                            this.xVelocity[index2DCache] = vX;
+                            this.yVelocity[index2DCache] = vY;
 
                             const uSquared = vX * vX + vY * vY;
+                            const oneMinusOnePointFiveUSquared = 1 - 1.5 * uSquared;
 
                             for (let d = 0; d < 9; d++) {
                                 const dotProduct = this.directionXVector[d] * vX + this.directionYVector[d] * vY;
-                                const equilibriumDensity = totalDensity * this.directionWeights[d] * (1 + 3 * dotProduct + 4.5 * dotProduct * dotProduct - 1.5 * uSquared);
-                                this.density[this.index(x, y, d)] = (1.0 - 1.0 / this.tau) * this.density[this.index(x, y, d)] + (1.0 / this.tau) * equilibriumDensity;
+                                const equilibriumDensity = totalDensity * this.directionWeights[d] * (oneMinusOnePointFiveUSquared + 3 * dotProduct + 4.5 * dotProduct * dotProduct);
+                                this.density[index3DBase + d] = oneMinusInverseTau * this.density[index3DBase + d] + inverseTau * equilibriumDensity;
                             }
                         }
                     }
@@ -208,10 +236,13 @@
 
             streamingAndBoundary() {
                 for (let x = 0; x < this.xDimension; x++) {
+                    const xOffset = x * this.yDimension;
                     for (let y = 0; y < this.yDimension; y++) {
-                        if (this.barrier[x][y]) {
+                        const index2D = xOffset + y;
+                        const index3DBase = index2D * 9;
+                        if (this.barrier[index2D]) {
                             for (let d = 0; d < 9; d++) {
-                                this.density2[this.index(x, y, d)] = this.density[this.index(x, y, this.oppositeDirection[d])];
+                                this.density2[index3DBase] = this.density[index3DBase + this.oppositeDirection[d]];
                             }
                             continue;
                         }
@@ -220,19 +251,20 @@
                             const prevX = x - this.directionXVector[d];
                             const prevY = y - this.directionYVector[d];
 
-                            if (prevX >= 0 && prevX < this.xDimension && prevY >= 0 && prevY < this.yDimension && !this.barrier[prevX][prevY]) {
-                                this.density2[this.index(x, y, d)] = this.density[this.index(prevX, prevY, d)];
-                            } else {
-                                if (prevX < 0 || prevX >= this.xDimension || prevY < 0 || prevY >= this.yDimension || this.barrier[prevX][prevY]) {
-                                    this.density2[this.index(x, y, d)] = this.density[this.index(x, y, this.oppositeDirection[d])];
+                            if (prevX >= 0 && prevX < this.xDimension && prevY >= 0 && prevY < this.yDimension) {
+                                const prevIndex2D = prevX * this.yDimension + prevY;
+                                if (!this.barrier[prevIndex2D]) {
+                                    this.density2[index3DBase + d] = this.density[prevIndex2D * 9 + d];
+                                } else {
+                                    this.density2[index3DBase + d] = this.density[index3DBase + this.oppositeDirection[d]];
                                 }
+                            } else {
+                                this.density2[index3DBase + d] = this.density[index3DBase + this.oppositeDirection[d]];
                             }
                         }
                     }
                 }
-                let temp = this.density;
-                this.density = this.density2;
-                this.density2 = temp;
+                [this.density, this.density2] = [this.density2, this.density];
             }
 
             inlet() {
@@ -241,16 +273,16 @@
                 const uSquared = this.flowSpeed * this.flowSpeed + vYFlow * vYFlow;
 
                 for (let y = 0; y < this.yDimension; y++) {
-                    if (!this.barrier[0][y]) {
+                    if (!this.barrier[this.index2D(0, y)]) {
                         for (let d = 0; d < 9; d++) {
                             const dotProduct = this.directionXVector[d] * this.flowSpeed + this.directionYVector[d] * vYFlow;
-                            this.density[this.index(0, y, d)] = this.directionWeights[d] * (densityFlow + 3 * dotProduct + 4.5 * dotProduct * dotProduct - 1.5 * uSquared);
+                            this.density[this.index3D(0, y, d)] = this.directionWeights[d] * (densityFlow + 3 * dotProduct + 4.5 * dotProduct * dotProduct - 1.5 * uSquared);
                         }
                     }
-                    if (!this.barrier[this.xDimension - 1][y]) {
+                    if (!this.barrier[this.index2D(this.xDimension - 1, y)]) {
                         for (let d = 0; d < 9; d++) {
                             const dotProduct = this.directionXVector[d] * this.flowSpeed + this.directionYVector[d] * vYFlow;
-                            this.density[this.index(this.xDimension - 1, y, d)] = this.directionWeights[d] * (densityFlow + 3 * dotProduct + 4.5 * dotProduct * dotProduct - 1.5 * uSquared);
+                            this.density[this.index3D(this.xDimension - 1, y, d)] = this.directionWeights[d] * (densityFlow + 3 * dotProduct + 4.5 * dotProduct * dotProduct - 1.5 * uSquared);
                         }
                     }
                 }
@@ -261,15 +293,15 @@
                 for (let x = 0; x < this.xDimension; x++) {
                     for (let y = 0; y < this.yDimension; y++) {
                         let color;
-                        if (this.barrier[x][y]) {
+                        if (this.barrier[this.index2D(x, y)]) {
                             color = 0xFF0000;
                         } else {
                             if (this.plot === 0) {
-                                const normalizedSpeed = Math.sqrt(this.xVelocity[x][y] * this.xVelocity[x][y] + this.yVelocity[x][y] * this.yVelocity[x][y]) / displayMaxSpeed;
+                                const normalizedSpeed = Math.sqrt(this.xVelocity[this.index2D(x, y)] * this.xVelocity[this.index2D(x, y)] + this.yVelocity[this.index2D(x, y)] * this.yVelocity[this.index2D(x, y)]) / displayMaxSpeed;
                                 const intensity = Math.floor(Math.max(0.0, Math.min(1.0, normalizedSpeed)) * 255);
                                 color = (0xFF << 24) | (intensity << 16) | (intensity << 8) | (intensity);
                             } else if (this.plot === 1) {
-                                const dens = this.macroDensity[x][y];
+                                const dens = this.macroDensity[this.index2D(x, y)];
                                 let intensity = Math.floor(((dens - (1 - this.densityVariation)) / (2 * this.densityVariation)) * 255);
                                 intensity = Math.max(0, Math.min(255, intensity));
                                 color = (0xFF << 24) | (intensity << 16) | (intensity << 8) | (intensity);
@@ -282,10 +314,10 @@
             }
 
             drawBarriers(index, xDimension, yDimension) {
-                const barrier = Array(xDimension).fill(0).map(() => Array(yDimension).fill(false));
+                const barrier = new Uint8Array(xDimension * yDimension);
                 if (index === 0) {
-                    for (let y = 35; y <= 65; y++) {
-                        barrier[50][y] = true;
+                    for (let y = 25; y <= 55; y++) {
+                        barrier[this.index2D(50, y)] = true;
                     }
                 } else if (index === 1) {
                     const centerX = 50;
@@ -297,7 +329,7 @@
                                 const dx = x - centerX;
                                 const dy = y - centerY;
                                 if (dx * dx + dy * dy <= radius * radius) {
-                                    barrier[x][y] = true;
+                                    barrier[this.index2D(x, y)] = true;
                                 }
                             }
                         }
@@ -317,41 +349,34 @@
 
                         for (let y = 0; y < yDimension; y++) {
                             if (y === 0 || y === yDimension - 1) continue;
-                            if (y <= upperWall || y >= lowerWall) barrier[x][y] = true;
+                            if (y <= upperWall || y >= lowerWall) barrier[this.index2D(x, y)] = true;
                         }
                     }
                 }
                 return barrier;
             }
 
-            paint() {
-                for (let n = 0; n < this.stepsPerFrame; n++) {
-                    this.inlet();
-                    this.collision();
-                    this.streamingAndBoundary();
-                }
-
+            render() {
                 this.renderToImage();
                 this.ctx.drawImage(this.canvas, 0, 0, this.xDimension, this.yDimension, 0, 0, this.xDimension * this.scale, this.yDimension * this.scale);
-
-
+                
                 if (this.drawLines) {
                     this.ctx.strokeStyle = 'blue';
                     this.ctx.lineWidth = 1;
 
                     for (let x = 0; x < this.xDimension; x++) {
                         for (let y = 0; y < this.yDimension; y++) {
-                            if (x % 5 === 0 && y % 5 === 0 && !this.barrier[x][y]) {
+                            if (x % 10 === 0 && y % 10 === 0 && !this.barrier[this.index2D(x, y)]) {
                                 let magnitudeScale = 0;
-                                const magnitude = Math.sqrt(this.xVelocity[x][y] * this.xVelocity[x][y] + this.yVelocity[x][y] * this.yVelocity[x][y]);
+                                const magnitude = Math.sqrt(this.xVelocity[this.index2D(x, y)] * this.xVelocity[this.index2D(x, y)] + this.yVelocity[this.index2D(x, y)] * this.yVelocity[this.index2D(x, y)]);
                                 const desiredMagnitude = 3;
                                 if (magnitude > 0) {
                                     magnitudeScale = desiredMagnitude / magnitude;
                                 }
                                 const x1 = x * this.scale;
                                 const y1 = y * this.scale;
-                                const x2 = x1 + this.xVelocity[x][y] * magnitudeScale * this.scale;
-                                const y2 = y1 + this.yVelocity[x][y] * magnitudeScale * this.scale;
+                                const x2 = x1 + this.xVelocity[this.index2D(x, y)] * magnitudeScale * this.scale;
+                                const y2 = y1 + this.yVelocity[this.index2D(x, y)] * magnitudeScale * this.scale;
 
                                 this.ctx.beginPath();
                                 this.ctx.moveTo(x1, y1);
@@ -362,13 +387,50 @@
                     }
                 }
             }
+    
+            updatePerformanceStats(timestamp) {
+                this.frameCount++;
+                const now = performance.now();
+                const frameDelta = now - this.lastFrameTime;
+                this.lastFrameTime = now;
+
+                if (now - this.lastFpsTime > 1000) {
+                    const fps = Math.round(this.frameCount * 1000 / (now - this.lastFpsTime));
+                    document.getElementById('fps').textContent = fps;
+                    document.getElementById('frameTime').textContent = frameDelta.toFixed(1);
+                    this.frameCount = 0;
+                    this.lastFpsTime = now;
+                }
+            }
 
             startAnimation() {
-                const animate = () => {
-                    this.paint();
+                const animate = (timestamp) => {
+                    if (!this.lastTime) {
+                        this.lastTime = timestamp;
+                    }
+
+                    const elapsed = timestamp - this.lastTime;
+                    const numSteps = Math.floor(elapsed / this.frameTime);
+                    const stepsToRun = Math.min(numSteps, this.stepsPerFrame);
+
+                    for (let i = 0; i < stepsToRun; i++) {
+                        this.updateSimulation();
+                    }
+                    this.lastTime += stepsToRun * this.frameTime;
+
+                    this.render();
+                    this.updatePerformanceStats(timestamp);
                     this.animationFrameId = requestAnimationFrame(animate);
                 };
                 this.animationFrameId = requestAnimationFrame(animate);
+            }
+
+            updateSimulation() {
+                for (let n = 0; n < this.stepsPerFrame; n++){
+                    this.inlet();
+                    this.collision();
+                    this.streamingAndBoundary();
+                }
             }
 
             stopAnimation() {
